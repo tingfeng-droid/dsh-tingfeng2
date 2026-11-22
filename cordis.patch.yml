@@ -1,0 +1,6 @@
+# dsh-tingfeng2 bundle patch：把会话检索插件插入 profile 名单。
+# 仅宿主侧（无 dsh.client 半边），不向前端投递代码。
+# 官方实验包与 palimpsest 的条目不在这里动——关旧是 P3 单独步骤。
+- insert:
+    - id: dsh-tingfeng2
+      name: 'dsh-tingfeng2'
