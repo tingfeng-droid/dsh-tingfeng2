@@ -121,15 +121,11 @@ function wordIdScore(s) {
 function looksLikePlaceholder(value) {
   const text = stripQuotes(String(value));
   if (!text) return true;
-  if (text === MASK) return true;
+  if (/^[$<«]/u.test(text)) return true;
   if (/^[x*]+$/iu.test(text)) return true;
   // 版本/semver 守卫整串匹配——版本形前缀后粘连真凭据后缀不再放行。
   if (/^[\^~>=<]*\d+(\.\d+){1,3}(?:[-+][0-9A-Za-z.-]+)?$/u.test(text)) return true;
-  if (/^(?:YOUR|EXAMPLE|PLACEHOLDER|REDACTED|CHANGEME|DUMMY|FAKE)[-_]?/iu.test(text)) return true;
-  // R14-E 豁免收窄：首字符命中 $/< 后须再校验整段为纯变量/占位词形；$+高熵、<词+高熵> 不放行。
-  if (/^\$[A-Za-z_][A-Za-z_]*$/u.test(text) || /^\$\d+$/u.test(text)) return true;
-  if (/^<[A-Za-z_][A-Za-z_-]*>$/u.test(text)) return true;
-  return false;
+  return /^(?:YOUR|EXAMPLE|PLACEHOLDER|REDACTED|CHANGEME|DUMMY|FAKE)[-_]?/iu.test(text);
 }
 
 function stripQuotes(v) {
@@ -173,29 +169,6 @@ function isRandomToken(v) {
   const digits = (s.match(/[0-9]/g) || []).length;
   if (digits < 4 || digits / s.length < 0.25) return false;
   return true;
-}
-
-// R14-E userinfo password 位弱混合口令谓词（对齐 0.4.1 口径，非无条件遮）：
-// 混合大小写＋数字＋长度阈＋词形/非秘密守卫；纯字母词典词/email/短弱口令/路径/UUID 不放行。
-// 阈值按 P 26 例双谓词矩阵标定，属可调精度边界；12 例两版同漏的短弱口令不在此谓词内。
-export function weakPasswordShape(v) {
-  const s = stripQuotes(String(v ?? ''));
-  if (!s || isNonSecretValue(s) || isIdentifier(s)) return false;
-  if (s.length < 16) return false;
-  if (!/[A-Z]/.test(s) || !/[a-z]/.test(s)) return false;
-  const digits = (s.match(/[0-9]/g) || []).length;
-  if (digits < 3) return false;
-  // 含口令标点（!@#$…）≥16 判弱口令；纯字母数字须 ≥20（短词典+数字串属既有盲区，不扩 scope）。
-  const hasPunct = /[^A-Za-z0-9]/.test(s);
-  if (!hasPunct && s.length < 20) return false;
-  if (/^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$/u.test(s)) return false;
-  return true;
-}
-
-// 剥外层尖括号占位包裹：<词+高熵> 形取内层再过凭据谓词（输出保留外层括号）。
-function unwrapAngle(s) {
-  const m = /^<([^<>]*)>$/u.exec(stripQuotes(String(s ?? '')));
-  return m ? m[1] : null;
 }
 
 // 统一凭据形判定（拒止口径）：命中任一凭据形即 true；路径/占位符/UUID/词形标识/纯版本判 false。
@@ -460,8 +433,8 @@ function atomHit(raw) {
 function isPlaceholderVar(v) {
   const s = stripQuotes(String(v ?? ''));
   if (!s) return true;
-  if (/^\$[A-Za-z_][A-Za-z_]*$/u.test(s) || /^\$\d+$/u.test(s)) return true;
-  if (/^<[A-Za-z_][A-Za-z_-]*>$/u.test(s)) return true;
+  if (/^\$[A-Za-z_]\w*$/u.test(s)) return true;
+  if (/^<[A-Za-z_][\w-]*>$/u.test(s)) return true;
   return looksLikePlaceholder(s);
 }
 
@@ -575,28 +548,11 @@ function evalUserinfo(uiRaw) {
   const kDec = decodeStable(rawKv ? rawKv.kRaw : (decKv ? decKv.kRaw : clean));
   const pDec = decodeStable(rawKv ? rawKv.vRaw : (decKv ? decKv.vRaw : clean));
   const uHit = !isPlaceholderVar(kDec) && atomHit(kDec);
-  const pExempt = isPlaceholderVar(pDec);
-  const angleInner = unwrapAngle(pDec);
-  const pInnerHit = angleInner !== null && bareCredential(angleInner);
-  console.error('DBG-UI', JSON.stringify({ pDec, angleInner, pInnerHit, rawKv: rawKv ? rawKv.vRaw : null }));
-  // password 位：非豁免字面量过原子谓词/敏感键/弱混合口令/尖括号内层凭据；裸 run 兜底对齐 evalKvToken。
-  const pHit = !pExempt && (atomHit(pDec) || isSecretKey(kDec) || weakPasswordShape(pDec) || pInnerHit);
+  const pHit = !isPlaceholderVar(pDec) && (atomHit(pDec) || isSecretKey(kDec));
   if (rawKv) {
-    let vText = rawKv.vRaw;
-    let vCount = 0;
-    if (pInnerHit) {
-      vText = '<' + MASK + '>';
-      vCount = 1;
-    } else if (pHit) {
-      vText = MASK;
-      vCount = 1;
-    } else if (!pExempt) {
-      const r = maskAtomsIn(rawKv.vRaw);
-      if (r.count) { vText = r.text; vCount = r.count; }
-    }
     return {
-      text: (uHit ? MASK : rawKv.kRaw) + rawKv.sepRaw + vText,
-      count: (uHit ? 1 : 0) + vCount,
+      text: (uHit ? MASK : rawKv.kRaw) + rawKv.sepRaw + (pHit ? MASK : rawKv.vRaw),
+      count: (uHit ? 1 : 0) + (pHit ? 1 : 0),
     };
   }
   const r = maskAtomsIn(clean);
