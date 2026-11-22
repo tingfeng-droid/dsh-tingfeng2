@@ -9,3 +9,4 @@ test/
 # 发布/编辑备份，不进仓库
 __backup__*/
 *.tgz
+.npmrc
