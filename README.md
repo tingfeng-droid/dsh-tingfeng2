@@ -85,3 +85,29 @@ node test/closure.js <db副本> <sessions根> [--strict]  # 宽提取闭包（�
 node test/truth.js <db副本> <sessions根>              # 独立真值召回
 node test/perf-r3.js <db副本> [limit]                 # 性能
 ```
+
+## 这套验证方法本身
+
+本插件的 14 轮反方复验整理成了四篇方法论，含判据、双谓词对照、帧级 diff、带缺口收口的写法：
+
+- **[红队自循环](docs/red-team-loop/README.md)** — 仪器和产品一起瞎 / 复验证据链 / 收敛不是清零 / 长程不散架
+
+## 和另外两个插件的联动
+
+三个项目互不依赖，各自可单独安装；放在一起才是一条完整链路，**共同原则只有一条：不生成、不改写，只搬原文。**
+
+```
+压缩            dsh-compaction-vcc   压缩时不调模型、不改写一个字，省略处留 (seq N) 指针
+  ↓                                  → 上下文变短了，但被省掉的原文随时可回读
+记忆            dsh-tingfeng        压缩之后把规则和记忆按原文重新注入
+  ↓                                  → 上下文被压缩过，不等于规则被改写过
+检索（本项目）   dsh-tingfeng2      跨会话找回原文；凭据形值一律打码，需要时授权回源
+```
+
+| 项目 | 解决什么 | 少了它会怎样 |
+|---|---|---|
+| [`dsh-compaction-vcc`](https://github.com/tingfeng-droid/dsh-compaction-vcc) | 上下文压缩不改写原文 | 压缩后细节被模型"改写"成看似合理的说法，且无法察觉 |
+| [`dsh-tingfeng`](https://github.com/tingfeng-droid/dsh-tingfeng) | 压缩后规则与记忆仍是原文 | 长会话里规则被悄悄改写成另一种意思，行为随之漂移 |
+| **`dsh-tingfeng2`**（本项目） | 跨会话检索原文 | 过去的结论找不回来，只能靠"我记得" |
+
+一个具体的合用场景：会话跑了一整天、被压缩过十几次之后，你问"上周那条结论当时是怎么定的"——`dsh-compaction-vcc` 保证本次会话里被省掉的原文能回读，`dsh-tingfeng` 保证规则没被改写，本项目保证上周那次会话还能整段搜出来。
