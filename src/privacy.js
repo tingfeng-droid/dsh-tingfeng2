@@ -1,4 +1,4 @@
-// 隐私出口四件套（0.4.5 / schema29，拒止式 deny-style＋通用裸 token 规则＋中文敏感键＋裸表格口径统一＋URL 组件化拆分＋逐组件原子评估＋容错多层解码/全角折叠/编码@拆分/host 不豁免/嵌套递归/跨段重组）。
+// 隐私出口四件套（0.4.9 / schema32，拒止式 deny-style＋通用裸 token 规则＋中文敏感键＋裸表格口径统一＋URL 组件化拆分＋逐组件原子评估＋容错多层解码/全角折叠/编码@拆分/host 不豁免/嵌套递归/跨段重组；R17 命令字面量操作数凭据兜底；R18 脏判定后骨架复核；R19 骨架夹真值：3(a)/3(b) 共用凭据形逐 run 扫描＋脏操作数段内兜底掩）。
 // 设计借鉴 dsh-palimpsest（MIT，cnkids），实现自写。
 // 0.3.0 路线图4：入库默认拒止式打码——凡凭据形值一律 «已打码» 占位符，
 // 不再按哈希标签/文件名/会话级图像/解码 head 豁免凭据形值；真哈希（SHA1/SHA256/MD5/commit/校验和）
@@ -100,8 +100,16 @@ function isUuid(v) {
 // 须 camel 结构且词形覆盖率 ≥0.6（纯随机混合大小写 token 词形分近 0，不被豁免）；
 // 单层量词避免在长混合大小写值上灾难性回溯。
 // R13：纯小写字母串＋短数字后缀（abc…xyz123456 / report2026）同属词形标识，不按裸凭据打码。
+// 16+ 连续 hex 且含 a-f 字母（纯数字日期/编号不算 hex 材料；R14-E 词＋hex 后缀形识别）。
+function hasHex16LetterRun(v) {
+  const runs = String(v).match(/[0-9a-f]{16,}/gi) || [];
+  return runs.some((r) => /[a-f]/i.test(r));
+}
+
 function isIdentifier(v) {
   const s = String(v);
+  // R14-E：含 16+ 连续 hex 字母串（词＋hex 后缀形）不是词形标识，不放行。
+  if (hasHex16LetterRun(s)) return false;
   const camel = /^[a-z][a-z0-9]*(?:[A-Z][a-z0-9]*)+$/u.test(s)
     || /^[A-Z][a-z0-9]*(?:[A-Z][a-z0-9]*)+$/u.test(s);
   if (camel && wordIdScore(s) >= 0.6) return true;
@@ -118,14 +126,68 @@ function wordIdScore(s) {
   return letters ? covered / letters : 0;
 }
 
+// 剥 $ 变量外壳 / <尖括号> 占位外壳；返回 {kind, inner} 或 null。
+function unwrapPlaceholder(s) {
+  let m = /^\$([\s\S]*)$/u.exec(s);
+  if (m) return { kind: '$', inner: m[1] };
+  m = /^<([^<>]*)>$/u.exec(s);
+  if (m) return { kind: '<', inner: m[1] };
+  return null;
+}
+
+// 占位内层凭据校验：剥外壳后的内层若命中凭据形（hex≥32 / credentialShape / bareCredential /
+// 16+ 连续 hex 串 / 弱混合口令），整串不豁免，仍须遮。
+function innerCredentialLike(inner) {
+  const s = stripQuotes(String(inner ?? ''));
+  if (!s) return false;
+  if (/^[0-9a-f]{32,}/iu.test(s)) return true;
+  if (hexCred(s)) return true;
+  if (credentialShape(s)) return true;
+  if (bareCredential(s)) return true;
+  if (hasHex16LetterRun(s)) return true;
+  if (weakPasswordShape(s)) return true;
+  return false;
+}
+
+// R16 第一刀：尖括号内层守卫。内层必须是「单一 token」——含空白/引号/=/斜杠/反斜杠/#/:/;/,
+// 任一字符即整体跳过（HTML/XML/标签属性/颜色/标记行不进凭据判定）；再排除 env 常量形
+// （全大写＋下划线）、可读小写下划线词形、已知占位前缀、内部 PALIMPSEST 标记词形、纯数字编号；
+// 只认真凭据形（hex≥32 / ≥16 连续 hex 含 a–f / 混合高熵 / 已知前缀＋高熵尾段）才遮。
+const ANGLE_BAN_CHARS = /[\s"'=\/\\#:;,]/u;
+const PALIMPSEST_MARKER_RE = /^(?:END-)?PALIMPSEST(?:ES)?(?:-DATA)?-/iu;
+function angleInnerCredential(raw) {
+  const s = stripQuotes(String(raw ?? ''));
+  if (!s || ANGLE_BAN_CHARS.test(s)) return false;
+  if (/^(?:YOUR|EXAMPLE|PLACEHOLDER|REDACTED|CHANGEME|DUMMY|FAKE)[-_]?/iu.test(s)) return false;
+  if (PALIMPSEST_MARKER_RE.test(s)) return false;
+  if (/^[A-Z][A-Z0-9_]*_[A-Z0-9_]*$/u.test(s)) return false;   // env 常量形 NPM_CONFIG_REGISTRY（须含下划线）
+  if (/^[a-z][a-z0-9]*_[a-z0-9_]*$/u.test(s)) return false;   // 小写下划线可读形 npm_package_name / file_path（须含下划线）
+  if (/^\d+$/u.test(s)) return false;                // 纯数字编号/文章 id 非凭据
+  return innerCredentialLike(s);
+}
+
+// 整串为 $变量形 / <词形> 占位，且内层非凭据材料才豁免（R14-E 豁免收窄）。
+function placeholderVarShape(s) {
+  const w = unwrapPlaceholder(s);
+  if (!w) return false;
+  if (w.kind === '$') {
+    if (!/^[A-Za-z_]\w*$/u.test(w.inner)) return false;
+  } else if (!/^[A-Za-z_][\w-]*$/u.test(w.inner)) {
+    return false;
+  }
+  return !innerCredentialLike(w.inner);
+}
+
 function looksLikePlaceholder(value) {
   const text = stripQuotes(String(value));
   if (!text) return true;
-  if (/^[$<«]/u.test(text)) return true;
+  if (text === MASK) return true;
   if (/^[x*]+$/iu.test(text)) return true;
   // 版本/semver 守卫整串匹配——版本形前缀后粘连真凭据后缀不再放行。
   if (/^[\^~>=<]*\d+(\.\d+){1,3}(?:[-+][0-9A-Za-z.-]+)?$/u.test(text)) return true;
-  return /^(?:YOUR|EXAMPLE|PLACEHOLDER|REDACTED|CHANGEME|DUMMY|FAKE)[-_]?/iu.test(text);
+  if (/^(?:YOUR|EXAMPLE|PLACEHOLDER|REDACTED|CHANGEME|DUMMY|FAKE)[-_]?/iu.test(text)) return true;
+  // R14-E：首字符 $/< 不再宽豁免；仅整串为真实变量/占位词形且内层非凭据材料才放行。
+  return placeholderVarShape(text);
 }
 
 function stripQuotes(v) {
@@ -180,6 +242,8 @@ export function credentialShape(raw) {
   if (isPathLike(v)) return false;
   if (isIdentifier(v)) return false;
   if (publicEncodedBlob(v)) return false;
+  // 内部 PALIMPSEST 标记词形（<<<PALIMPSEST-DATA-<id>>> / END-…）是结构标记，不是凭据。
+  if (PALIMPSEST_MARKER_RE.test(v)) return false;
   // 已知凭据前缀（frps/npm/CSRF/sk-/ghp_/AKIA/xox/sqap_/Bearer 等）。
   if (/^(?:sk-|sq[ap]_|gh[pousr]_|AKIA|xox[abprs]-|npm_)/i.test(v)) return true;
   if (/^Bearer\s/i.test(v)) return true;
@@ -231,6 +295,25 @@ export function bareCredential(v) {
   return false;
 }
 
+// R14-E userinfo password 位弱混合口令谓词（回归 0.4.1「password 位遮字面口令」口径）：
+// 混合大小写＋数字，或词典词＋数字串。排除守卫防 email / 用户名 / 纯字母词典词 / URL / UUID /
+// 词形标识 / 公开编码材料被反噬；纯字母短词不命中（既有保留口径）。
+function weakPasswordShape(v) {
+  const s = stripQuotes(String(v ?? ''));
+  if (!s) return false;
+  if (isIdentifier(s) || isNonSecretValue(s) || isPlaceholderVar(s)) return false;
+  if (isPathLike(s) || isUuid(s) || publicEncodedBlob(s)) return false;
+  if (/^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$/u.test(s)) return false; // email 不反噬
+  if (s.length < 16) return false;
+  if (!/[A-Z]/.test(s) || !/[a-z]/.test(s)) return false;
+  const digits = (s.match(/[0-9]/g) || []).length;
+  if (digits < 3) return false;
+  const hasPunct = /[^A-Za-z0-9]/.test(s);
+  // 含口令标点 ≥16 判弱口令；纯字母数字须 ≥20（短词典＋短数字串保留为盲区，不扩 scope）。
+  if (!hasPunct && s.length < 20) return false;
+  return true;
+}
+
 // 裸形态键守卫：整键须敏感；拒止口径不再按哈希列名/文件名上下文豁免凭据形值。
 function bareKeyOk(kept) {
   return isSecretKey(kept);
@@ -252,13 +335,23 @@ const RULES = [
     pattern: /(\b(?=[A-Z0-9_.\-\uFFFD]*[A-Z_\-])[A-Z0-9_.\-\uFFFD]{1,60}["'“”‘’]?\s*[=:：＝]\s*)(["'“”‘’][^"'“”‘’\n]{8,}["'“”‘’]|[^\s"',;，；]{8,})/giu,
     keep: 1,
     accept: (kept, value) => isSecretKey(kept) || credentialShape(value),
-    rejectValue: isNonSecretValue,
+    rejectValue: (v) => isNonSecretValue(v) || isReferenceForm(v),
   },
   {
     // 引号包裹凭据值（单/双/反引号，含 JSON 转义；开闭引号须同类型反向引用）。
     pattern: /(\\?["'`])([^"'`\n\s]{6,}?)(\1)/g,
     group: 2,
     accept: (v) => credentialShape(v) || hexCred(v),
+    rejectValue: isReferenceForm,
+  },
+  {
+    // R15-P1：尖括号占位内层位置无关高熵扫描——内层任意位置出现 ≥16 位连续 hex（含 a–f 字母）
+    // 或 atomHit/credentialShape/裸凭据/弱口令命中，即不豁免、整段内层遮（外层尖括号保真）；
+    // <token>/<gh_token> 等无高熵 run 的纯占位词仍留。按形状修，不钉单个样例。
+    // R16 第一刀：内层先过单一 token 守卫＋占位/常量词形排除，HTML/XML/属性/标记行整体跳过。
+    pattern: /<([^<>]{6,})>/gu,
+    group: 1,
+    accept: (v) => angleInnerCredential(v),
   },
   {
     // 裸键值表格形态（键＋Tab/空格＋值，无赋值符）。键名敏感 OR 值裸凭据形即打码；
@@ -266,7 +359,7 @@ const RULES = [
     pattern: /((?:^|[\s\t"'])[A-Za-z0-9_.\-]{1,60}[ \t]+)([^\s\t"']{8,})(?=[\s\t"']|$)/giu,
     keep: 1,
     accept: (kept, value) => isSecretKey(kept) || bareCredential(value),
-    rejectValue: (v) => isNonSecretValue(v) || !bareCredential(v),
+    rejectValue: (v) => isNonSecretValue(v) || !bareCredential(v) || isReferenceForm(v),
   },
   {
     // JWT 三段形（eyJ 头＋点分 base64url），键/引号无关。
@@ -290,7 +383,7 @@ const RULES = [
     pattern: /([A-Za-z0-9+/=_-]{24,})/gu,
     group: 1,
     accept: (v) => credentialShape(v),
-    rejectValue: isNonSecretValue,
+    rejectValue: (v) => isNonSecretValue(v) || isReferenceForm(v),
     // 排除命中整段跳过：不前进 1 字符重试碎片——公开编码材料失配解码后的碎片会伪过高熵门。
     skipWhole: true,
   },
@@ -433,9 +526,39 @@ function atomHit(raw) {
 function isPlaceholderVar(v) {
   const s = stripQuotes(String(v ?? ''));
   if (!s) return true;
-  if (/^\$[A-Za-z_]\w*$/u.test(s)) return true;
-  if (/^<[A-Za-z_][\w-]*>$/u.test(s)) return true;
+  if (placeholderVarShape(s)) return true;
   return looksLikePlaceholder(s);
+}
+
+// R15-P2：纯引用形豁免——${…} 整花括号（含被空格截断的未闭合残片）、$var、$var.prop 点号链、
+// <占位词>（允许尾随 /路径 模板后缀）。内层/尾部一旦带 ≥16 位 hex 字母 run 或凭据形材料，
+// innerCredentialLike 命中即不豁免，仍按凭据遮；判据是「引用形 vs 披着引用外壳的凭据」。
+function isReferenceForm(v) {
+  const s = stripQuotes(String(v ?? ''));
+  if (!s) return false;
+  if (/^\$\{/u.test(s)) {
+    const inner = s.endsWith('}') ? s.slice(2, -1) : s.slice(2);
+    return !innerCredentialLike(inner);
+  }
+  const dollar = /^\$([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)$/u.exec(s);
+  if (dollar) return !innerCredentialLike(dollar[1]);
+  const ang = /^<([A-Za-z_][\w-]*)>(\/.*)?$/u.exec(s);
+  if (ang) return !innerCredentialLike(ang[1]);
+  // 路径/模板串：含 `/` 且带 <占位词>（占位内层非凭据、整串无 ≥16 hex run）即纯模板引用；
+  // 不带占位词的字面高熵路径段仍按凭据遮。
+  if (/\//u.test(s) && /<[^<>\/]+>/u.test(s)) {
+    const inners = [...s.matchAll(/<([^<>]+)>/g)].map((x) => x[1]);
+    if (inners.length && inners.every((w) => !innerCredentialLike(w)) && !hasHex16LetterRun(s)) return true;
+  }
+  // R16 第二刀：转义/模板上下文头部占位——先剥 `\"`/`\$`/`\<`/`\`` 转义；值以 $ident 或 <占位词>
+  // 起手、尾部是模板字面量（PowerShell 反引号换行/URL/拼接片段）时，头部内层非凭据、整串无 ≥16
+  // hex 字母 run、尾部无凭据原子即豁免；头部本身是高熵凭据或尾部带凭据材料仍遮。
+  const unesc = s.replace(/\\([$<"'`])/gu, '$1');
+  const headDollar = /^\$([A-Za-z_]\w*)([\s\S]*)$/u.exec(unesc);
+  if (headDollar && !innerCredentialLike(headDollar[1]) && !hasHex16LetterRun(unesc) && !atomHit(headDollar[2])) return true;
+  const headAng = /^<([A-Za-z_][\w-]*)>([\s\S]*)$/u.exec(unesc);
+  if (headAng && !innerCredentialLike(headAng[1]) && !hasHex16LetterRun(unesc) && !atomHit(headAng[2])) return true;
+  return false;
 }
 
 // 组件内裸凭据 run 抽取（通用闭合：凭据值总落在某组件，KV/userinfo 拆分失败也扫）。
@@ -507,7 +630,7 @@ function evalKvToken(raw, depth) {
     }
   }
   const secretKey = keys.some((k) => isSecretKey(k));
-  const valHit = (v) => v && !isPlaceholderVar(v) && (atomHit(v) || secretKey);
+  const valHit = (v) => v && !isPlaceholderVar(v) && !isReferenceForm(v) && (atomHit(v) || secretKey);
   if (rawKv) {
     const vDec = decodeStable(rawKv.vRaw);
     if (valHit(vDec)) return { text: rawKv.kRaw + rawKv.sepRaw + MASK, count: 1 };
@@ -547,13 +670,24 @@ function evalUserinfo(uiRaw) {
   const decKv = splitKv(d);
   const kDec = decodeStable(rawKv ? rawKv.kRaw : (decKv ? decKv.kRaw : clean));
   const pDec = decodeStable(rawKv ? rawKv.vRaw : (decKv ? decKv.vRaw : clean));
-  const uHit = !isPlaceholderVar(kDec) && atomHit(kDec);
-  const pHit = !isPlaceholderVar(pDec) && (atomHit(pDec) || isSecretKey(kDec));
+  const uHit = !isPlaceholderVar(kDec) && !isReferenceForm(kDec) && atomHit(kDec);
+  // password 位：原子命中 / 敏感键 / 弱混合口令；豁免变量/占位/纯引用形不放行字面口令。
+  const pHit = !isPlaceholderVar(pDec) && !isReferenceForm(pDec) && (atomHit(pDec) || isSecretKey(kDec) || weakPasswordShape(pDec));
   if (rawKv) {
-    return {
-      text: (uHit ? MASK : rawKv.kRaw) + rawKv.sepRaw + (pHit ? MASK : rawKv.vRaw),
-      count: (uHit ? 1 : 0) + (pHit ? 1 : 0),
-    };
+    // 值位未按键值命中：组件内裸 run 兜底（与 evalKvToken 同口径；vRaw/kRaw 都兜）。
+    let vText = rawKv.vRaw, vCount = 0;
+    if (pHit) { vText = MASK; vCount = 1; }
+    else if (!isPlaceholderVar(pDec) && !isReferenceForm(pDec)) {
+      const rv = maskAtomsIn(rawKv.vRaw);
+      if (rv.count) { vText = rv.text; vCount = rv.count; }
+    }
+    let kText = rawKv.kRaw, kCount = 0;
+    if (uHit) { kText = MASK; kCount = 1; }
+    else if (!isPlaceholderVar(kDec) && !isReferenceForm(kDec)) {
+      const rk = maskAtomsIn(rawKv.kRaw);
+      if (rk.count) { kText = rk.text; kCount = rk.count; }
+    }
+    return { text: kText + rawKv.sepRaw + vText, count: kCount + vCount };
   }
   const r = maskAtomsIn(clean);
   if (r.count) return { text: r.text, count: r.count };
@@ -598,7 +732,7 @@ function redactUrlSpan(span, depth = 0) {
   if (qi >= 0) { pathPart = rest.slice(0, qi); queryPart = rest.slice(qi + 1); }
 
   const segMask = (seg) => {
-    if (!seg || seg === MASK || looksLikePlaceholder(seg)) return { text: seg, count: 0 };
+    if (!seg || seg === MASK) return { text: seg, count: 0 };
     // 段内嵌套二级 scheme URL → 递归按跨度规则评估。
     if (depth < MAX_URL_DEPTH && /https?:\/\//iu.test(seg)) {
       const r = redactUrlSpan(seg, depth + 1);
@@ -606,10 +740,16 @@ function redactUrlSpan(span, depth = 0) {
     }
     // 路径矩阵参数（;token=…）与路径内冒号/等号/全角键值 → 键值原子评估。
     if (seg.includes(';') || splitKv(seg)) return evalKvToken(seg, depth);
+    // R14-E：剥 $ / <> 外壳后判形；内层凭据仍须遮，外层包裹保真保留（不提前豁免整段）。
+    const w = unwrapPlaceholder(seg);
+    const inner = w ? w.inner : seg;
+    const wrapHit = (count) => w
+      ? { text: (w.kind === '$' ? '$' : '<') + MASK + (w.kind === '<' ? '>' : ''), count }
+      : { text: MASK, count };
     // 镜像全局长 hex 类级拒止规则：≥32 位 hex（真哈希/commit/校验和/令牌）不被 publicEncodedBlob 等排除守卫放回。
-    if (/^[0-9a-f]{32,}/iu.test(seg)) return { text: MASK, count: 1 };
-    if (credentialShape(seg)) return { text: MASK, count: 1 };
-    // 段内裸 run 兜底：拆分未命中时仍扫组件内凭据原子。
+    if (/^[0-9a-f]{32,}/iu.test(inner)) return wrapHit(1);
+    if (credentialShape(inner)) return wrapHit(1);
+    // 段内裸 run 兜底：拆分未命中时仍扫组件内凭据原子（外壳非 run 字符，自然保留）。
     return maskAtomsIn(seg);
   };
 
@@ -675,9 +815,140 @@ export function redact(input) {
   return { text: out, count };
 }
 
+// R16 第二刀：命令式正则/替换字面量保护。PowerShell -replace/-match/-notmatch/-ireplace/-imatch
+// 的引号操作数、sed s/pat/rep/ 的模式串与替换串是字面量，不是赋值右值；规则扫描前先摘出占位，
+// 收尾还原，避免把正则里的敏感键词形（'^password='）误判成键邻接赋值。
+// R17 机制缺口修补：摘出免检前必须先对操作数内部做凭据形兜底评估——操作数内不含高熵原子才整体
+// 豁免（保住 'tokens=<n>'、'password=<hidden>'、(\d+)、s/password=.*/…/ 骨架）；含真值/凭据形
+// 原子则不摘出，退回逐原子规则评估（骨架留、值遮）。判定按操作数形状走通用谓词，不给单个 cmdlet 打补丁。
+const PROTECTED_SENTINEL_RE = /\uE000(\d+)\uE001/g;
+const CMD_OPERAND_RE = /('[^'\n]*'|"[^"\n]*"|`[^`\n]*`)/giu;
+// R18 骨架复核：脏判定命中后、决定不豁免之前，再核一层"是否只是正则/词表骨架"。
+// R19-P1：3(a) 词表段与 3(b) 正则 run 走同一凭据形判定函数；3(b) 放行前逐 run 扫实值，
+// 真凭据粘在字符类/量词/锚点上不再整体放行。
+// 放行条件（须同时满足无实值，且形态为二者之一）：
+//  - 无 ≥24 位连续 base62/hex 类实值 run；无 crypt 哈希；无 JWT 实值；
+//    sk-/ghp_/npm_ 等前缀后须是字符类/量词/元字符（正则骨架），裸 alnum 尾段仍算实值；
+//  - (a) `|` 分隔短段词表，每段短且无实值 run；或 (b) 含正则元字符（[...]/{m,n}/\s/\. /^/$ 等）而无实值。
+
+// 单段凭据形判定（3(a) 词表段、3(b) 正则 run 共用，不许两套实现）。
+function operandSegmentCredential(seg) {
+  const v = stripQuotes(String(seg ?? ''));
+  if (!v || looksLikePlaceholder(v)) return false;
+  // 裸前缀词（npm_/ghp_/gho_/sk- 等无实值尾段）是正则条件字面量，不是凭据；
+  // 须后跟实值尾段才算命中，避免把 '^npm_' / 'ghp_' 这类骨架条件整段误掩。
+  if (/^(?:sk-|sq[ap]_|gh[pousr]_|ghs_|npm_|xox[abprs]-|AKIA)$/i.test(v)) return false;
+  // 只认强凭据段（≥32 hex / credentialShape 高熵 / 路径 B64 / 弱混合口令）；
+  // 不引入 bareCredential 的 16–31 短 hex 短档——那是既有登记盲区，骨架扫描不借机上调门槛。
+  return atomHit(v) || weakPasswordShape(v);
+}
+// 操作数内是否嵌有实值凭据（crypt/JWT/已知前缀后跟实值/任一 alnum 段命中凭据形）。
+function operandHasRealValue(s) {
+  // crypt 哈希 / JWT 实值 ⇒ 实值。
+  if (/\$2[aby]\$|\$1\$|\$6\$rounds/i.test(s)) return true;
+  if (/^eyJ[A-Za-z0-9_.\-~]{8,}\.[A-Za-z0-9_.\-~]{8,}\.[A-Za-z0-9_.\-~]{4,}$/u.test(s)) return true;
+  if (/^eyJ[A-Za-z0-9_.\-~]{20,}$/u.test(s)) return true;
+  // 已知凭据前缀：后跟字符类/量词/转义/锚点 ⇒ 正则骨架；后跟裸 alnum 尾段 ⇒ 实值。
+  const mPrefix = s.match(/^(sk-|ghp_|gho_|ghs_|npm_)/i);
+  if (mPrefix) {
+    const rest = s.slice(mPrefix[1].length);
+    const hasRegexMeta = /[[\]{}\\^$?.+*]/.test(rest);
+    if (!hasRegexMeta) {
+      const tail = rest.split(/[^A-Za-z0-9_-]+/u).filter(Boolean);
+      if (tail.some((t) => t.length >= 16 || atomHit(t))) return true;
+    }
+  }
+  // 逐段扫描：正则元字符/非 alnum 切开（- + / = 亦作分隔，避免字符类字母与前缀连成伪段），
+  // 任一段命中凭据形 ⇒ 嵌有实值。
+  const segs = s.split(/[^A-Za-z0-9_]+/u).filter(Boolean);
+  return segs.some((seg) => operandSegmentCredential(seg));
+}
+function commandOperandSkeleton(raw) {
+  const s = stripQuotes(String(raw ?? ''));
+  if (!s) return false;
+  // 嵌有实值凭据 ⇒ 非骨架。
+  if (operandHasRealValue(s)) return false;
+  // 3(a) 竖杠短段词表：每段短、无实值段。
+  if (s.includes('|')) {
+    const segs = s.split('|').map((x) => x.trim()).filter(Boolean);
+    if (segs.length && segs.every((x) => x.length < 24 && !operandSegmentCredential(x))) return true;
+  }
+  // 3(b) 正则元字符且无实值。
+  if (/[[\]{}]|\\[s.wn]|\^|\$/u.test(s)) return true;
+  return false;
+}
+function commandOperandClean(raw, allowSkeleton = false) {
+  const s = stripQuotes(String(raw ?? ''));
+  if (!s) return true;
+  const dirty = atomHit(s) || innerCredentialLike(s) || weakPasswordShape(s) || operandHasRealValue(s);
+  // 脏判定后走骨架复核：骨架形（词表/正则无实值）仍豁免；确含实值原子才退回逐原子评估。
+  // allowSkeleton 仅授予 base 终态本就无条件摘出的站点（-match/-replace 族、sed）；
+  // 后补站点（Select-String -Pattern、awk、-split/contains 族）沿用 R17 脏判定，不做骨架复核。
+  if (dirty && (!allowSkeleton || !commandOperandSkeleton(s))) return false;
+  return true;
+}
+// R19-P1：脏操作数段内兜底：把已命中凭据形的 alnum 段替换为 MASK，骨架字符/引号保真。
+// 通用裸 run 规则对 <24 位粘连残片覆盖不到；段内扫描与骨架复核共用 operandSegmentCredential。
+function maskDirtyOperand(raw) {
+  const rawStr = String(raw ?? '');
+  const s = stripQuotes(rawStr);
+  if (!s) return { text: rawStr, masked: 0 };
+  // 逐段替换：转义序列（\s/\w/\n/\d 等）整体当骨架保真；分隔符原样保留；
+  // 仅 alnum 段过凭据形判定，不让贪婪 run 把骨架字母并入凭据段一起吃掉。
+  const parts = s.match(/\\[A-Za-z]|[^A-Za-z0-9_]+|[A-Za-z0-9_]+/gu) || [];
+  let masked = 0;
+  const maskedParts = parts.map((part) => {
+    if (/^[A-Za-z0-9_]+$/u.test(part) && operandSegmentCredential(part)) { masked++; return MASK; }
+    return part;
+  });
+  const maskedStr = maskedParts.join('');
+  const q = /^["'“”‘’`]/.test(rawStr) ? rawStr[0] : '';
+  return { text: q ? q + maskedStr + q : maskedStr, masked };
+}
+function protectCommandLiterals(text) {
+  const protectedKept = [];
+  const push = (s) => { protectedKept.push(s); return '' + (protectedKept.length - 1) + ''; };
+  // 操作数干净 → sentinel 摘出免检；含凭据原子 → 段内兜底掩凭据段、骨架字符保真，交回 RULES 收尾。
+  // allowSkeleton 仅 base 终态无条件摘出的站点（-match/-replace 族、sed）；其余站点不做骨架复核。
+  let opMasked = 0;
+  const protectOperand = (raw, allowSkeleton) => {
+    if (commandOperandClean(raw, allowSkeleton)) return push(raw);
+    const m = maskDirtyOperand(raw);
+    opMasked += m.masked;
+    return m.text;
+  };
+  let out = String(text ?? '');
+  out = out.replace(
+    /(-(?:replace|match|notmatch|ireplace|imatch|split|contains|icontains|notcontains)\b\s+)('[^'\n]*'|"[^"\n]*"|`[^`\n]*`)(\s*,\s*('[^'\n]*'|"[^"\n]*"|`[^`\n]*`))?/giu,
+    (m, op, a, _c, b) => {
+      const allow = /-(?:match|replace|notmatch|ireplace|imatch)\b/i.test(op);
+      return op + protectOperand(a, allow) + (b ? ',' + protectOperand(b, allow) : '');
+    },
+  );
+  out = out.replace(
+    /(Select-String|sls)\b([^\n|]*?)-Pattern\s+('[^'\n]*'|"[^"\n]*"|`[^`\n]*`)/giu,
+    (m, verb, pre, pat) => verb + pre + '-Pattern ' + protectOperand(pat, false),
+  );
+  out = out.replace(
+    /\bawk\b([^\n;|]*?)('[^'\n]*'|"[^"\n]*"|`[^`\n]*`)/giu,
+    (m, pre, pat) => 'awk' + pre + protectOperand(pat, false),
+  );
+  out = out.replace(
+    /\bsed\b([^\n;|]*?)\bs\/((?:[^/\\\n]|\\.)*)\/((?:[^/\\\n]|\\.)*)\/[a-z]*/giu,
+    (m, pre, pat, rep) => 'sed' + pre + 's/' + protectOperand(pat, true) + '/' + protectOperand(rep, true) + '/',
+  );
+  return { text: out, protectedKept, opMasked };
+}
+function restoreProtected(text, protectedKept) {
+  return String(text ?? '').replace(PROTECTED_SENTINEL_RE, (_, i) => protectedKept[Number(i)] ?? '');
+}
+
 function redactText(input) {
   let text = input;
   let count = 0;
+  const { text: protectedText, protectedKept, opMasked } = protectCommandLiterals(text);
+  text = protectedText;
+  count += opMasked;
   for (const rule of RULES) {
     // 受控前进：被拒绝的匹配只前进 1 字符而非吞掉整段，避免前序非密钥匹配遮蔽内层真凭据（R3-1）。
     const re = new RegExp(rule.pattern.source, rule.pattern.flags);
@@ -713,6 +984,7 @@ function redactText(input) {
     out += text.slice(last);
     text = out;
   }
+  text = restoreProtected(text, protectedKept);
   return { text, count };
 }
 

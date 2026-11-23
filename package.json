@@ -1,6 +1,6 @@
 {
   "name": "dsh-tingfeng2",
-  "version": "0.4.5",
+  "version": "0.4.9",
   "description": "DSH 会话检索插件：旁路持久索引 + 中文双字滑窗召回 + 子串兜底。官方包零改动，只消费宿主读取契约。",
   "type": "module",
   "license": "MIT",

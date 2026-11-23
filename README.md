@@ -1,4 +1,4 @@
-# dsh-tingfeng2（0.4.5 / schema 29）
+# dsh-tingfeng2（0.4.9 / schema 32）
 
 DSH 会话检索插件：**旁路持久索引 + 中文双字滑窗召回 + 原文子串兜底**。
 

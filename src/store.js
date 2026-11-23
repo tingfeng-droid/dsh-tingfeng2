@@ -1,4 +1,4 @@
-// 旁路索引库（0.4.3，schema 27）：自己的文件/application_id/schema，绝不碰官方 sessions.sqlite。
+// 旁路索引库（0.4.8，schema 32）：自己的文件/application_id/schema，绝不碰官方 sessions.sqlite。
 // B3：入库即打码。R3-3：净化先于打码（normalizeForRedact），凭据字符类容 FFFD，孤立代理切断仍打码。
 // B1：标题 NULL 原样入库。B15/R2-11：净化替换字符 U+FFFD。R3-9：cleanForIndex 防 null 入参。
 // R2-10：ftsGroups 分组聚合下推 SQL。R3-10：摘录批量预取（窗口函数 top-N/会话），消除 N+1。
@@ -12,7 +12,7 @@ import { normalizeText, foldWidth, stripZeroWidth, sanitizeSurrogates, normalize
 import { redact, redactDeep } from './privacy.js';
 
 const APP_ID = 0x52434c4c; // 'RCLL'
-const SCHEMA_VERSION = 29; // 0.4.5：URL 组件化逐组件原子评估/容错解码/全角折叠/编码@拆分/host 不豁免（打码行为变更）⇒ 强制重建
+const SCHEMA_VERSION = 32; // 0.4.8：脏判定后骨架复核（-match/-replace 族、sed 站点词表/正则骨架无实值仍豁免）⇒ 行为变更，guard 须认得
 
 /** 入库文本处理（R3-3/R3-9）：防 null → 折半角/去零宽/净化（normalizeForRedact）→ 迭代凭据打码。 */
 export function cleanForIndex(text) {
